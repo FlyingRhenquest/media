@@ -1,0 +1,137 @@
+/**
+ * Copyright 2018 Bruce Ide
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ * Use libswscale to convert video frames from decoder to OpenCV mats.
+ * We convert the frame buffere from whatever pixel format it is
+ * (often YUVJ420P) to BGR24 and, import the buffer into a CV::Mat
+ * and then deep-copy the mat. If you don't copy the mat, the one you
+ * get back will use the BGR24 buffer from this object, which will 
+ * no longer be valid once available gets called.
+ *
+ * For simplicity's sake, I'm doing this in the available callback,
+ * which gets called in the same thread that decoder is processing
+ * in. If you don't want to slow your decoder down, you could do
+ * a version of this object that copies the frame buffers from
+ * decoder into a buffer of some sort (Circular queue might be good
+ * for that sort of thing) and handle converting them to mats in
+ * other threads.
+ *
+ * I'm not particularly concerned about the frame numbers here, but
+ * since you have acccess to the AVFrame from decoder, that'll have
+ * the dts/pts timestamps for that frame. So if you care about more
+ * than "this frame came later than that one", you might want to look
+ * at those.
+ */
+
+#ifndef _HPP_FR_MEDIA_FRAME2CV
+#define _HPP_FR_MEDIA_FRAME2CV
+
+extern "C" {
+#include <libavutil/imgutils.h>
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+}
+
+#include <boost/signals2.hpp>
+#include <boost/log/trivial.hpp>
+#include <fr/media/video_decoder_subscriber>
+#include <memory>
+#include <opencv2/imgproc/imgproc.hpp>
+
+namespace fr {
+  
+  namespace media {
+    
+    class frame2cv : public video_decoder_subscriber
+    {
+      
+      int source_width;
+      int source_height;
+      AVPixelFormat source_format;
+      AVPixelFormat target_format;
+      SwsContext *current_context;
+
+      // Swscale doesn't create frames or anything, it just dumps
+      // directly into these buffers. For a planar BGR24 format,
+      // everything will be in target_buffers[0] and
+      // target_linesize[0]. You can do the math and alloc them
+      // yourself if you want to, but av_image_alloc isn't too bad.
+      uint8_t *target_buffers[4];
+      int target_linesize[4];
+      
+    public:
+
+      typedef std::shared_ptr<frame2cv> pointer;
+
+      static pointer create(AVPixelFormat target_format = AV_PIX_FMT_BGR24)
+      {
+	return std::make_shared<frame2cv>(target_format);
+      }
+
+      boost::signals2::signal<void(cv::Mat)> available;
+      
+      frame2cv(AVPixelFormat target_format = AV_PIX_FMT_BGR24) : source_width(0), source_height(0), source_format(AV_PIX_FMT_NONE), target_format(target_format), current_context(nullptr)
+	{	  
+	}
+
+      virtual ~frame2cv()
+      {
+	if (nullptr != current_context) {
+	  sws_freeContext(current_context);
+	  av_freep(&target_buffers[0]);
+	}
+      }
+
+      void video_available_cb(AVFrame *frame) override
+      {
+	if (nullptr == current_context) {
+	  // First time through, set up context and stuff
+	  source_width = frame->width;
+	  source_height = frame->height;
+	  source_format = (AVPixelFormat) frame->format;
+	  current_context = sws_getCachedContext(current_context, source_width, source_height, source_format,
+						 source_width, source_height, target_format, SWS_BICUBIC, nullptr, nullptr, nullptr);
+	  av_image_alloc(target_buffers, target_linesize, source_width, source_height, target_format, 32);
+	} else {
+	  // Just make sure source width, height and format didn't change.
+	  if (frame->width != source_width || frame->height != source_height || (AVPixelFormat) frame->format != source_format) {
+	    BOOST_LOG_TRIVIAL(info) << "frame2cv source width, height or format changed. Getting new scaler.";
+	    source_width = frame->width;
+	    source_height = frame->height;
+	    source_format = (AVPixelFormat) frame->format;
+	    sws_freeContext(current_context);
+	    current_context = nullptr;
+	    av_freep(&target_buffers[0]);
+	    current_context = sws_getCachedContext(current_context, source_width, source_height, source_format,
+						   source_width, source_height, target_format, 0, nullptr, nullptr, nullptr);
+	    av_image_alloc(target_buffers, target_linesize, source_width, source_height, target_format, 32);
+	  }
+	}
+	sws_scale(current_context, frame->data, frame->linesize, 0, source_height, target_buffers, target_linesize);
+	// If you want a B&W you can probably skip all this if your source is yuvj420p and just use
+	// the Y channel (data[0]) with CV_LOAD_IMAGE_GRAYSCALE
+	cv::Mat raw_mat(source_height, source_width, CV_8UC3, target_buffers[0], target_linesize[0]);
+	// Need to deep copy so we don't lose our pixels when this function returns
+	cv::Mat copied_mat;
+	raw_mat.copyTo(copied_mat);
+	available(copied_mat);
+      }	
+            
+    };
+        
+  }
+}
+
+#endif

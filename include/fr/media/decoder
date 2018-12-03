@@ -1,0 +1,351 @@
+/**
+ * Copyright 2018 Bruce Ide
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ * This object uses ffmpeg to decode a media asset. It runs in a
+ * separate thread, and provides a signal you can use to receive
+ * decoded video frames.
+ *
+ */
+
+#ifndef _HPP_FR_MEDIA_DECODER
+#define _HPP_FR_MEDIA_DECODER
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+}
+
+#include <boost/log/trivial.hpp>
+#include <boost/signals2.hpp>
+#include <fr/media/decoder_subscriber_interface>
+#include <functional>
+#include <memory>
+#include <thread>
+#include <mutex>
+#include <vector>
+
+namespace fr {
+
+  namespace media {
+
+    class decoder {
+
+      // Name of the video asset to be opened. This'll take anything
+      // ffmpeg can handle, so try a URL or something.
+      std::string filename;
+
+      // Optional input format. Can be set to null, which is the
+      // default. If it's set to null, the class will try to open the
+      // file with it set to null. If that fails, it'll start
+      // iterating through all the input formats until one works.
+      AVInputFormat *inpf;
+      
+      // Used to open the media file. You'll need to call
+      // av_register_all and possibly avformat_network_init befeore
+      // using this class.
+      
+      AVFormatContext *format_context;
+
+
+      // I need to hold onto these codec contexts while I'm decoding
+      // so I can release them at the end. I want them to have the
+      // same index as the stream index, so if I can't open one, I'll
+      // put a nullptr in there.
+
+      std::vector<AVCodecContext *> codec_contexts;
+
+      // Some state flags
+      bool opened;
+      bool done;
+      bool processing;
+      // Toggle to true to make process_privately exit early.
+      bool shutdown_flag; 
+      
+      std::thread processing_thread;
+
+      // Opens format. If it doesn't work and inpf is null, try all
+      // the input formats until one works or we run out of formats.
+      bool open_format()
+      {
+	bool retval = false;
+
+	// Last parameter of avformat_open_input is a dictionary.
+	// It's easy enough to enable passing those in this object,
+	// but generally for decoding you shouldn't have to mess
+	// with them.
+	int open_result = avformat_open_input(&format_context, filename.c_str(), inpf, nullptr);  
+
+	if (open_result < 0) {
+	  if (nullptr == inpf) {
+	    BOOST_LOG_TRIVIAL(debug) << "Unable to open " << filename << " with an empty input format. Trying some other ones.";
+	    av_demuxer_iterate((void **)&inpf);
+	    while(nullptr != inpf) {
+	      BOOST_LOG_TRIVIAL(debug) << "Trying format: " << inpf->name;
+	      open_result = avformat_open_input(&format_context, filename.c_str(), inpf, nullptr); 
+	      if (0 == open_result) {
+		retval = true;
+		break;
+	      }
+	      av_demuxer_iterate((void **)&inpf);
+	    }
+	  }
+	} else {
+	  retval = true;
+	}
+	return retval;
+      }
+
+      /**
+       * Goes through all the streams in the container and sets up codec contexts
+       */
+
+      bool setup_codec_contexts()
+      {
+	bool any_codecs_opened = false;
+	for (int i = 0 ; i < format_context->nb_streams; ++i) {
+	  // We need to find the codec and use it to allocate a codec context
+	  AVCodec *current_codec;
+	  AVCodecContext *codec_context;
+	  current_codec = avcodec_find_decoder(format_context->streams[i]->codecpar->codec_id);
+	  if (!current_codec) {
+	    BOOST_LOG_TRIVIAL(error) << "Could not find decoder for codec ID " << format_context->streams[i]->codecpar->codec_id;
+	    // I want to have the vector addressable with the stream ID, so I'll insert a nullptr
+	    // for this stream.
+	    codec_contexts.push_back(nullptr);
+	  } else {
+	    codec_context = avcodec_alloc_context3(current_codec);
+	    if (nullptr == codec_context) {
+	      BOOST_LOG_TRIVIAL(error) << "Unable to alloc codec context for codec id " << format_context->streams[i]->codecpar->codec_id;
+	      codec_contexts.push_back(nullptr);
+	    } else {
+	      // Copy codec parameters from input stream to newly allocated codec context
+	      if (avcodec_parameters_to_context(codec_context, format_context->streams[i]->codecpar) < 0) {
+		BOOST_LOG_TRIVIAL(error) << "Could not copy parameters to codec context for codec id " << format_context->streams[i]->codecpar->codec_id;
+		avcodec_free_context(&codec_context);
+		codec_contexts.push_back(nullptr);
+	      } else {
+		// Now that it's all set up, open the codec
+		if (avcodec_open2(codec_context, current_codec, nullptr) < 0) {
+		  BOOST_LOG_TRIVIAL(error) << "Could not open codec :/";
+		  avcodec_free_context(&codec_context);
+		  codec_contexts.push_back(nullptr);
+		} else {
+		  any_codecs_opened = true;
+		  codec_contexts.push_back(codec_context);
+
+		}
+	      }
+	    }
+	  }
+	}
+	return any_codecs_opened;
+      }
+      
+      
+      // Opens the format, codecs, all those things
+      void open_all_the_things()
+      {
+	if (open_format()) {
+	  if (setup_codec_contexts()) {
+	    opened = true;
+	  }
+	} else {
+	  BOOST_LOG_TRIVIAL(error) << "Unable to open " << filename << " with any registered format.";
+	}
+      }
+
+      void close_all_the_things()
+      {
+	while(!codec_contexts.empty()) {
+	  auto context = codec_contexts.back();
+	  codec_contexts.pop_back();
+	  if (nullptr != context) {
+	    avcodec_free_context(&context);
+	  }
+	}
+	avformat_close_input(&format_context);
+	av_free(format_context);
+	format_context = nullptr;
+      }
+
+      // Check with lock
+      bool shutting_down()
+      {
+	bool retval = false;
+	std::lock_guard<std::mutex> lock(signaling_mutex);
+	return shutdown_flag || done;				   
+      }
+
+      // This method runs in a separate thread and just reads and
+      // decodes packets until we hit the end of the file.
+
+      void process_privately()
+      {
+	AVPacket compressed_packet;
+	AVFrame *uncompressed_frame = av_frame_alloc();
+	int avret = 0;
+	
+	// shutdown signals are external, done is set internally
+	// if we hit an EOF or error while decoding.
+	while(!shutting_down()) {
+	  if (av_read_frame(format_context, &compressed_packet) < 0) {
+	    BOOST_LOG_TRIVIAL(info) << "Hit EOF or something, all done.";
+	    std::lock_guard<std::mutex> lock(signaling_mutex);
+	    done = true;
+	  } else {
+	    // Use the correct codec context to decode the stream
+	    if (nullptr != codec_contexts[compressed_packet.stream_index]) {
+	      AVCodecContext *current_codec = codec_contexts[compressed_packet.stream_index];
+	      avret = avcodec_send_packet(current_codec, &compressed_packet);
+	      if (avret < 0) {
+		// You can look these errors up and log them with av_err2str if you want
+		BOOST_LOG_TRIVIAL(info) << "avcodec_send_packet returned " << avret << "; shutting down.";
+		std::lock_guard<std::mutex> lock(signaling_mutex);
+		done = true;
+	      } else {
+		while(avret >= 0) {
+		  avret = avcodec_receive_frame(current_codec, uncompressed_frame);
+		  if (AVERROR(EAGAIN) == avret || AVERROR_EOF == avret) {
+		    break;
+		  } else if (avret < 0) {
+		    BOOST_LOG_TRIVIAL(debug) << "Error reading frame: " << avret;
+		    std::lock_guard<std::mutex> lock(signaling_mutex);
+		    done = true;
+		    break;
+		  }
+		  // Well... here we are.
+		  if (AVMEDIA_TYPE_VIDEO == current_codec->codec_type) {
+		    video_available(uncompressed_frame);
+		  } else if (AVMEDIA_TYPE_AUDIO == current_codec->codec_type) {
+		    audio_available(uncompressed_frame);
+		  } else {
+		    other_available(uncompressed_frame, current_codec->codec_type);
+		  }
+		   
+		}
+	      }
+	    }
+	  }
+	}
+	av_frame_free(&uncompressed_frame);
+      }
+      
+    public:
+
+
+      // If you don't like shared pointers, don't use them. I like
+      // them, and it makes these things a lot easier to pass around.
+      // You can totally allocate this on the stack if that's what
+      // you want to do.
+      typedef std::shared_ptr<decoder> pointer;
+
+      static pointer create(std::string filename, AVInputFormat *inpf = nullptr)
+      {
+	return std::make_shared<decoder>(filename, inpf); 
+      }
+      
+      // OK, with these signals, they're gonna get processed in the
+      // decoder thread. So unless you deliberately want to bog down
+      // the decoder thread (Which CAN be a feature,) you should copy
+      // these bits and do heavy lifting in a different thread. And
+      // you DO have to copy them if you want to keep them, because
+      // once this signal returns, the bits in here are going to get
+      // clobbered, since we're reusing the AVPacket for the next
+      // decode.
+      
+      boost::signals2::signal<void(AVFrame *)> video_available;
+      boost::signals2::signal<void(AVFrame *)> audio_available;
+      
+      // No idea what other packets we could deliver you, so
+      // I'll just put the AVMediaType in the callback.
+      
+      boost::signals2::signal<void(AVFrame *, AVMediaType)> other_available;
+
+      // Mutex for tweaking signal flags.
+      std::mutex signaling_mutex;
+
+      decoder(std::string filename, AVInputFormat *inpf = nullptr) : filename(filename), inpf(inpf), opened(false), done(false), processing(false), shutdown_flag(false)
+      {	
+      }
+
+      // NO COPIES FOR YOU!
+      decoder(const decoder &copy) = delete;
+
+      ~decoder()
+      {
+	{ // Make a new scope so I don't have to keep the signalling mutex open for long
+	  std::lock_guard<std::mutex> lock(signaling_mutex);
+	  if (opened && !done) {
+
+	    // Will instruct processing thread to stop
+	    done = true;
+	  }
+	}
+
+	this->join();
+      }
+
+      // Add a subscriber
+
+      void add(decoder_subscriber_interface::pointer subscriber)
+      {
+	subscriber->subscribe(this);
+      }
+      
+      // Join thread. If all you want to once you kick off proceses is wait until processing is done,
+      // this isn't a bad option.
+      void join()
+      {
+	if (processing_thread.joinable()) {
+	  processing_thread.join();
+	}
+	// After you do this, you should be able to kick off processing on this object again.
+
+	close_all_the_things();
+      }
+      
+      // This initiates processing. Subscribe to the signals prior to pushing this
+      // button.
+
+      void process()
+      {
+	if (opened || processing) {
+	  BOOST_LOG_TRIVIAL(error) << "Already processing.";
+	} else {
+	  open_all_the_things();
+	  if (opened) {
+	    processing_thread = std::thread(std::bind(&decoder::process_privately, this));	    
+	  }
+	}
+      }
+
+      void shutdown()
+      {
+	std::lock_guard<std::mutex> lock(signaling_mutex);
+	if (!opened && !processing) {
+	  BOOST_LOG_TRIVIAL(error) << "Shutdown called but I'm not processing right now.";
+	  return;
+	}
+	shutdown_flag = true;
+      }
+      
+    };
+    
+  }
+}
+
+
+#endif
