@@ -30,6 +30,7 @@ extern "C" {
 
 #include <boost/log/trivial.hpp>
 #include <boost/signals2.hpp>
+#include <fr/media/decoder_interface>
 #include <fr/media/decoder_subscriber_interface>
 #include <functional>
 #include <memory>
@@ -41,7 +42,7 @@ namespace fr {
 
   namespace media {
 
-    class decoder {
+    class decoder : public decoder_interface {
 
       // Name of the video asset to be opened. This'll take anything
       // ffmpeg can handle, so try a URL or something.
@@ -257,22 +258,6 @@ namespace fr {
 	return std::make_shared<decoder>(filename, inpf); 
       }
       
-      // OK, with these signals, they're gonna get processed in the
-      // decoder thread. So unless you deliberately want to bog down
-      // the decoder thread (Which CAN be a feature,) you should copy
-      // these bits and do heavy lifting in a different thread. And
-      // you DO have to copy them if you want to keep them, because
-      // once this signal returns, the bits in here are going to get
-      // clobbered, since we're reusing the AVPacket for the next
-      // decode.
-      
-      boost::signals2::signal<void(AVFrame *)> video_available;
-      boost::signals2::signal<void(AVFrame *)> audio_available;
-      
-      // No idea what other packets we could deliver you, so
-      // I'll just put the AVMediaType in the callback.
-      
-      boost::signals2::signal<void(AVFrame *, AVMediaType)> other_available;
 
       // Mutex for tweaking signal flags.
       std::mutex signaling_mutex;
@@ -284,7 +269,7 @@ namespace fr {
       // NO COPIES FOR YOU!
       decoder(const decoder &copy) = delete;
 
-      ~decoder()
+      virtual ~decoder()
       {
 	{ // Make a new scope so I don't have to keep the signalling mutex open for long
 	  std::lock_guard<std::mutex> lock(signaling_mutex);
@@ -298,13 +283,6 @@ namespace fr {
 	this->join();
       }
 
-      // Add a subscriber
-
-      void add(decoder_subscriber_interface::pointer subscriber)
-      {
-	subscriber->subscribe(this);
-      }
-      
       // Join thread. If all you want to once you kick off proceses is wait until processing is done,
       // this isn't a bad option.
       void join()

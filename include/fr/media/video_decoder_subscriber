@@ -23,7 +23,7 @@
 #define _HPP_FR_MEDIA_VIDEO_SUBSCRIBER
 
 #include <fr/media/decoder_subscriber_interface>
-#include <fr/media/decoder>
+#include <fr/media/decoder_interface>
 
 namespace fr {
 
@@ -42,7 +42,7 @@ namespace fr {
       
       virtual void video_available_cb(AVFrame *frame) = 0;
       
-      void subscribe(decoder *that) override
+      void subscribe(decoder_interface *that) override
       {
 	subscription = that->video_available.connect(std::bind(&video_decoder_subscriber::video_available_cb, this, std::placeholders::_1));
       }

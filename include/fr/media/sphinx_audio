@@ -1,0 +1,247 @@
+/**
+ * Copyright 2018 Bruce Ide
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ * This object uses pocketsphinx to recognize speech in an audio
+ * stream. It expects the audio format to match the decoder, so
+ * it'll need 16khz samples in int16_t (16 bit signed) chunks,
+ * apparently. Using some other format will probably cause a
+ * segfault. If you want to be sure, write a resampler that
+ * allows adds of audio_decoder_subscribers and attach the
+ * resampler to your decoder and this object to your resampler.
+ *
+ * I should note I'm just going through the pocketsphinx tutorial
+ * here and have no idea if this'll actually work. Turns out
+ * this is a pretty bad example for sphinx and the sphinx devs
+ * would probably point out all the ways I'm doing it wrong, but
+ * it was kind of neat to poke at it and at least get some sort
+ * of result in my unit test. That's about all the work I want to
+ * put into it, but I'll leave this here in case someone else
+ * wants to build on it.
+ */
+
+#ifndef _FR_MEDIA_HPP_SPHINX_AUDIO
+#define _FR_MEDIA_HPP_SPHINX_AUDIO
+
+#include <fr/media/audio_decoder_subscriber>
+#include <boost/log/trivial.hpp>
+#include <boost/signals2.hpp>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <pocketsphinx.h>
+#include <stdexcept>
+#include <stdlib.h>
+#include <string>
+#include <thread>
+
+
+namespace fr {
+
+  namespace media {
+
+    class sphinx_audio : public audio_decoder_subscriber {
+
+      
+      ps_decoder_t *ps;
+      cmd_ln_t *config;
+      bool processing;
+      bool done;
+      int16_t samples[160000]; // 10 seconds of 16k samples
+      int nsamples;
+      std::mutex vector_mutex; // Mutex for access to samples/nsamples.
+      std::mutex flag_mutex; // Mutex for flags
+      std::thread processing_thread;
+
+      void set_local_done(bool &local_done)
+      {
+	std::lock_guard<std::mutex> lock(flag_mutex);
+	local_done = done;
+      }
+      
+      // Process audio from samples buffer until shutdown is called.
+
+      void process_privately()
+      {
+	bool local_done = false;
+	
+	uint8 in_speech = 0;
+	bool need_processing = false;
+	std::string words;
+	{
+	  std::lock_guard<std::mutex> lock(flag_mutex);
+	  processing = true;
+	  done = false;
+	}
+	ps_start_utt(ps);
+	while(!local_done) {
+	  bool continue_flag = false;
+	  { // New scope so we dodn't hold the lock 
+	    std::lock_guard<std::mutex> lock(vector_mutex);    
+
+	    if (nsamples >= 32000) {
+	      // If we have about 5 seconds of audio
+	      ps_process_raw(ps, samples, nsamples, FALSE, FALSE);
+	      nsamples = 0;
+	    } else {
+	      continue_flag = true;
+	    }
+	  }
+
+	  if (continue_flag) {
+	    set_local_done(local_done);
+	    continue;
+	  }
+
+	  BOOST_LOG_TRIVIAL(debug) << "Checking if we're in speech...";
+	  uint8 currently_in_speech = ps_get_in_speech(ps);
+	  if (currently_in_speech > 0) {
+	    BOOST_LOG_TRIVIAL(debug) << "in speech";
+	  } else {
+	    BOOST_LOG_TRIVIAL(debug) << "Nope!";
+	  }
+	  
+	  if (!in_speech && currently_in_speech) {
+	    BOOST_LOG_TRIVIAL(debug) << "In speech";
+	    in_speech = currently_in_speech;
+	    need_processing = true;
+	  } else if (in_speech && !currently_in_speech) {
+	    BOOST_LOG_TRIVIAL(debug) << "Out of speech";
+	    in_speech = 0;
+	  }
+
+	  if (!in_speech && need_processing) {
+	    	     
+	    ps_end_utt(ps);
+	      
+	    const char *hyp = ps_get_hyp(ps, nullptr);
+	    if (nullptr != hyp) {
+	      words = std::string(hyp);
+	      float64 confidence = logmath_exp(ps_get_logmath(ps), ps_get_prob(ps)) * 100.0;
+	      available(words, confidence);
+	    }
+	    
+	    need_processing = false;
+	    ps_start_utt(ps);
+	  }
+	  	  
+	  set_local_done(local_done);
+	}
+	ps_end_utt(ps);
+	BOOST_LOG_TRIVIAL(debug) << "Sphinx processing thread exiting";
+      }
+	
+    public:
+
+      /**
+       * Available fires with a word sphinx thought it recognized and the confidence
+       * of the hypothesis as a percentage 0 - 100 as a float64
+       */
+      
+      boost::signals2::signal<void(std::string, float64)> available;
+      
+      typedef std::shared_ptr<sphinx_audio> pointer;
+
+      static pointer create(std::string model_dir, std::string model, std::string dict)
+      {
+	return std::make_shared<sphinx_audio>(model_dir, model, dict);
+      }
+      
+      /**
+       * Initialize with sphynx info:
+       * acoustic_model - Directory for acoustic model (ie /usr/local/share/pocketsphinx/model/en-us/en-us)
+       * language_model - Language model bin file (/usr/local/share/pocketsphinx/model/en-us/en-us.lm.bin)
+       * dict - Dictionary (/usr/local/share/pocketsphinx/model/en-us/cmudict-en-us.dict)
+       *
+       * C style string concatination should still work passing in these parameters, so if you
+       * get model dir with pkg-config --variable=modeldir pocketsphinx and pass it as a
+       * compiler define with MODELDIR, MODELDIR "/en-us/en-us" should still work.
+       */
+      
+      sphinx_audio(std::string acoustic_model, std::string language_model, std::string dict) : ps(nullptr), config(nullptr), processing(false), done(false), nsamples(0)
+      {
+	config = cmd_ln_init(nullptr, ps_args(), TRUE,
+			     "-hmm", acoustic_model.c_str(),
+			     "-lm", language_model.c_str(),
+			     "-dict", dict.c_str(),
+			     "-logfn", "/dev/null",
+			     nullptr);
+	if (nullptr == config) {
+	  std::string err("sphinx_audio: cmd_line_init returned null");
+	  BOOST_LOG_TRIVIAL(error) << err;
+	  throw std::logic_error(err);
+	}
+	ps = ps_init(config);
+	if (nullptr == ps) {
+	  std::string err("sphinx_audio: could not init create sphinx processor");
+	  BOOST_LOG_TRIVIAL(error) << err;
+	  cmd_ln_free_r(config);
+	  throw std::logic_error(err);
+	}
+	process();
+      }
+
+      ~sphinx_audio()
+      {
+	shutdown();
+	ps_free(ps);
+	cmd_ln_free_r(config);
+      }
+
+      /**
+       * We will only get audio frames with this.
+       */
+      
+      void audio_available_cb(AVFrame *frame) override
+      {
+	// AVFrame struct reference states that audio must all be in data[0]
+	// and that linesize[0] is the number of bytes on that line)
+
+	std::lock_guard<std::mutex> lock(vector_mutex);
+
+	if (nsamples + frame->nb_samples > 160000) {
+	  BOOST_LOG_TRIVIAL(error) << "Dropping audio samples rather than segfaulting (process_privately not processing fast enough?)";
+	  return;
+	}
+	
+	// I'm playing it REALLY fast and loose, here...
+
+	memcpy(&samples[nsamples], frame->data[0], frame->linesize[0]);
+	nsamples += frame->nb_samples;
+	
+      }
+
+      void shutdown()
+      {
+	{
+	  std::lock_guard<std::mutex> lock(flag_mutex);
+	  done = true;
+	}
+	if (processing_thread.joinable()) {
+	  processing_thread.join();
+	}
+      }
+
+      void process()
+      {
+	BOOST_LOG_TRIVIAL(debug) << "Sphinx Audio processing";
+	processing_thread = std::thread(std::bind(&sphinx_audio::process_privately, this));
+      }
+
+    };
+
+  }
+}
+
+#endif

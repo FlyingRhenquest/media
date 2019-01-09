@@ -1,0 +1,190 @@
+/**
+ * Copyright 2018 Bruce Ide
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ * An audio decoder subscriber that resamples the incoming audio, whatever
+ * it is, to a specified output format.
+ *
+ * For simplicity's sake, this resamples in the available signal. This
+ * will be in the same thread as your audio decoder. 
+ */
+
+#ifndef _HPP_FR_MEDIA_AUDIO_RESAMPLER
+#define _HPP_FR_MEDIA_AUDIO_RESAMPLER
+
+extern "C" {
+#include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
+#include <libswresample/swresample.h>  
+}
+
+#include <functional>
+#include <memory>
+#include <fr/media/audio_decoder_subscriber>
+#include <boost/log/trivial.hpp>
+#include <boost/signals2.hpp>
+#include <stdexcept>
+
+namespace fr {
+
+  namespace media {
+
+    class audio_resampler : public decoder_interface, public audio_decoder_subscriber {
+
+      SwrContext *context;
+      int64_t out_channel_layout;
+      AVSampleFormat out_sample_format;
+      int out_sample_rate;
+      AVFrame *output_frame;
+      int max_samples;
+
+      uint8_t **data;
+      int linesize;
+      
+
+      // Sets up the context and output frame based
+      // on the first frame of input. I could make this
+      // change if the frame format changes, but I'm
+      // not going to right now.
+
+      void make_context_for(AVFrame *src)
+      {
+	context = swr_alloc_set_opts(context,
+				     out_channel_layout,
+				     out_sample_format,
+				     out_sample_rate,
+				     src->channel_layout,
+				     (AVSampleFormat) src->format,
+				     src->sample_rate,
+				     0, nullptr);
+	int output_channels = av_get_channel_layout_nb_channels(out_channel_layout);
+	// If channel layout isn't set, use channels to get channels, otherwise retrieve it from
+	// the layout
+	if (src->channel_layout == 0) {
+	  av_opt_set_int(context, "ich", src->channels, 0);
+	} else {
+	  av_opt_set_int(context, "ich", av_get_channel_layout_nb_channels(src->channel_layout), 0);
+	}
+	av_opt_set_int(context, "och", output_channels, 0);
+	if (nullptr == context) {
+	  BOOST_LOG_TRIVIAL(error) << "Unable to allocate rescale context";
+	  
+	  throw std::logic_error("Unable to allocate rescale context");
+	}
+	swr_init(context);
+	output_frame = av_frame_alloc();
+	if (nullptr == output_frame) {
+	  // This SHOULD never fail, but I may as well check it
+	  throw std::logic_error("Unable to alloc output frame");
+	}
+
+	output_frame->pts = 0l;
+	output_frame->nb_samples = 0; // It probably is anyway
+	output_frame->sample_rate = out_sample_rate;
+	output_frame->format = (int) out_sample_format;
+	output_frame->channel_layout = out_channel_layout;
+	output_frame->channels = output_channels;
+      }
+      
+    public:
+
+      typedef std::shared_ptr<audio_resampler> pointer;
+
+      /**
+       * At this point I don't particularly want to wrap the Libav audio
+       * definitions, so you'll need to be somewhat familiar with
+       * AVSampleFormats and how they handle channels. That stuff seems
+       * to be reasonably well documented though. See
+       * https://ffmpeg.org/doxygen/4.0/channel__layout_8h.html
+       * and https://ffmpeg.org/doxygen/4.0/samplefmt_8h.html
+       */
+      
+      audio_resampler(int64_t out_channel_layout, AVSampleFormat out_sample_format,
+		      int out_sample_rate) : context(nullptr),
+					     out_sample_format(out_sample_format),
+					     out_channel_layout(out_channel_layout),
+					     out_sample_rate(out_sample_rate),
+					     output_frame(nullptr),
+					     max_samples(0),
+					     data(nullptr)
+      {
+      }
+
+      virtual ~audio_resampler()
+      {
+	if (nullptr != context) {
+	  swr_free(&context);
+	}
+	if (nullptr != output_frame) {
+	  av_frame_free(&output_frame);
+	}
+      }
+
+      static pointer create(int64_t out_channel_layout, AVSampleFormat out_sample_format,
+			    int out_sample_rate)
+      {
+	return std::make_shared<audio_resampler>(out_channel_layout, out_sample_format, out_sample_rate);
+      }
+
+      void audio_available_cb(AVFrame *frame) override
+      {
+	if (nullptr == context) {
+	  // This will also allocate and set up the frame
+	  make_context_for(frame);
+	}
+	// TODO: Should I check the context against the
+	// frame each time? I could, and reallocate it
+	// if it's different, but I'm going to assume
+	// your audio source isn't going to change.
+
+	// Compute number of samples we're going to output
+	
+	output_frame->nb_samples = av_rescale_rnd(frame->nb_samples, out_sample_rate, frame->sample_rate, AV_ROUND_UP);
+	// I can TOTALLY do this, right?
+	
+	if (output_frame->nb_samples > max_samples) {
+	  // Have to reallocate for more samples
+	  max_samples = output_frame->nb_samples;
+
+	  output_frame->channels = av_get_channel_layout_nb_channels(out_channel_layout);
+	  int fill_rc = av_samples_alloc_array_and_samples(&data, &linesize, output_frame->channels, output_frame->nb_samples, out_sample_format, 0);
+	  output_frame->data[0] = data[0];
+	  if (fill_rc < 0) {
+	    BOOST_LOG_TRIVIAL(error) << "Error filling buffers: " << fill_rc;
+	  }
+	}
+
+	int convert_rc = swr_convert(context,
+				     data, output_frame->nb_samples, (const uint8_t **)&frame->data[0], frame->nb_samples);
+
+
+	if (convert_rc <= 0) {
+	  BOOST_LOG_TRIVIAL(error) << "Error converting data: " << convert_rc;
+	}
+
+	
+	output_frame->nb_samples = convert_rc;
+	output_frame->pts += output_frame->nb_samples;
+
+	audio_available(output_frame);
+      }
+
+    };
+    
+  }
+}
+
+
+#endif

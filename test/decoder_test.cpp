@@ -112,7 +112,7 @@ public:
     other_subscription.disconnect();
   }
 
-  void subscribe(fr::media::decoder *that)
+  void subscribe(fr::media::decoder_interface *that) override
   {
     ahelp.subscribe(that);
     vhelp.subscribe(that);

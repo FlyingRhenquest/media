@@ -33,11 +33,10 @@ extern "C" {
 #include <memory>
 
 namespace fr {
-
+  
   namespace media {
+    class decoder_interface;
 
-    class decoder;
-    
     class decoder_subscriber_interface {
       
     public:
@@ -46,9 +45,9 @@ namespace fr {
       virtual ~decoder_subscriber_interface()
       {
       }
-            
-      virtual void subscribe(decoder *to_subscribe) = 0;
 
+      virtual void subscribe(decoder_interface *to) = 0;
+      
     };
     
   }

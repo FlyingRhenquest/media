@@ -22,11 +22,18 @@
 #define _HPP_FR_MEDIA_AUDIO_SUBSCRIBER
 
 #include <fr/media/decoder_subscriber_interface>
-#include <fr/media/decoder>
+#include <fr/media/decoder_interface>
+#include <memory>
 
 namespace fr {
 
   namespace media {
+
+    // I want anything with an audio_available signal to be subscribable, so I'm
+    // actually not inherting from the decoder subscriber interface for this,
+    // so I can templatize the subscribe function. I might eventually do this
+    // for the video one as well, at which point I'll probably just drop the
+    // interface (Which doesn't really do that much anyway.)
 
     class audio_decoder_subscriber : public decoder_subscriber_interface {
 
@@ -34,14 +41,18 @@ namespace fr {
 
     public:
 
+      typedef std::shared_ptr<audio_decoder_subscriber> pointer;
+
       virtual ~audio_decoder_subscriber()
       {
 	subscription.disconnect();
       }
       
-      virtual void audio_available_cb(AVFrame *framee) = 0;
+      virtual void audio_available_cb(AVFrame *frame) = 0;
 
-      void subscribe(decoder *that) override
+      // I want anything that has an audio_available signal to be subscribable
+
+      void subscribe(decoder_interface *that) override
       {
 	subscription = that->audio_available.connect(std::bind(&audio_decoder_subscriber::audio_available_cb, this, std::placeholders::_1));
       }

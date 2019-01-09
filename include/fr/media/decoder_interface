@@ -1,0 +1,77 @@
+/**
+ * Copyright 2018 Bruce Ide
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ * Generic interace so I can make multiple decoder-type things
+ * subscribable.
+ */
+
+#ifndef _HPP_FR_MEDIA_DECODER_INTERFACE
+#define _HPP_FR_MEDIA_DECODER_INTERFACE
+
+#include <boost/signals2.hpp>
+#include <fr/media/decoder_subscriber_interface>
+#include <memory>
+
+namespace fr {
+
+  namespace media {
+
+    class decoder_interface {
+
+    public:
+
+      // OK, with these signals, they're gonna get processed in the
+      // decoder thread. So unless you deliberately want to bog down
+      // the decoder thread (Which CAN be a feature,) you should copy
+      // these bits and do heavy lifting in a different thread. And
+      // you DO have to copy them if you want to keep them, because
+      // once this signal returns, the bits in here are going to get
+      // clobbered, since we're reusing the AVPacket for the next
+      // decode.
+      
+      boost::signals2::signal<void(AVFrame *)> video_available;
+      boost::signals2::signal<void(AVFrame *)> audio_available;
+      
+      // No idea what other packets we could deliver you, so
+      // I'll just put the AVMediaType in the callback.
+      
+      boost::signals2::signal<void(AVFrame *, AVMediaType)> other_available;
+
+
+      virtual void add(decoder_subscriber_interface *subscriber)
+      {
+	subscriber->subscribe(this);
+      }
+
+      virtual void add(decoder_subscriber_interface &subscriber)
+      {
+	subscriber.subscribe(this);
+      }
+
+      virtual void add(std::shared_ptr<decoder_subscriber_interface> subscriber)
+      {
+	subscriber->subscribe(this);
+      }
+
+      virtual void add(std::unique_ptr<decoder_subscriber_interface> subscriber)
+      {
+	subscriber->subscribe(this);
+      }
+      
+    };
+
+  }
+}
+#endif
