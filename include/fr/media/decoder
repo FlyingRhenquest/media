@@ -262,7 +262,7 @@ namespace fr {
       // Mutex for tweaking signal flags.
       std::mutex signaling_mutex;
 
-      decoder(std::string filename, AVInputFormat *inpf = nullptr) : filename(filename), inpf(inpf), opened(false), done(false), processing(false), shutdown_flag(false)
+      decoder(std::string filename, AVInputFormat *inpf = nullptr) : filename(filename), inpf(inpf), format_context(nullptr), opened(false), done(false), processing(false), shutdown_flag(false)
       {	
       }
 

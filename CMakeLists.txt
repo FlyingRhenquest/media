@@ -119,3 +119,21 @@ install(FILES
 if (pocketsphinx_FOUND)
   message("Using sphinx model dir: ${SPHINX_MODELDIR}")
 endif()
+
+
+#
+# Examples
+#
+
+option(BUILD_EXAMPLES "Build examples" ON)
+
+if (BUILD_EXAMPLES)
+
+  # brisque video assumes you installed the brisque library from my repo
+  # in /usr/local
+  add_executable(brisque_video ${CMAKE_SOURCE_DIR}/examples/brisque_video.cpp)
+  target_include_directories(brisque_video PRIVATE ${FFLIBS_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(brisque_video PRIVATE ${FFLIBS_LIBRARIES} ${Boost_LIBRARIES} ${OpenCV_LIBRARIES} brisque_iqa svm)
+  target_compile_options(brisque_video PRIVATE ${FFLIBS_CFLAGS_OTHER} ${Boost_CFLAGS_OTHER} ${OpenCV_CFLAGS_OTHER})
+
+endif()
