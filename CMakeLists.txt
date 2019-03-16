@@ -38,6 +38,7 @@ endif()
 set(TEST_DATA_DIR "${CMAKE_BINARY_DIR}/test_data")
 file(MAKE_DIRECTORY ${TEST_DATA_DIR})
 configure_file(${CMAKE_SOURCE_DIR}/test/data/hello_world.wav ${TEST_DATA_DIR}/hello_world.wav COPYONLY)
+configure_file(${CMAKE_SOURCE_DIR}/test/data/motion_test.mp4 ${TEST_DATA_DIR}/motion_test.mp4 COPYONLY)
 
 if (NOT EXISTS ${TEST_DATA_DIR}/testvideo.webm)
   message("Generating test video")
@@ -70,11 +71,20 @@ if (${pocketsphinx_FOUND})
   target_compile_definitions(sphinx_audio_test PRIVATE TEST_DATA_DIR="${TEST_DATA_DIR}" MODELDIR="${SPHINX_MODELDIR}")
 endif()
   
-add_executable(audio_resampler_test ${CMAKE_SOURCE_DIR}/test/test_runner_basic.cpp ${CMAKE_SOURCE_DIR}/test/audio_resampler_test)
+add_executable(audio_resampler_test ${CMAKE_SOURCE_DIR}/test/test_runner_basic.cpp ${CMAKE_SOURCE_DIR}/test/audio_resampler_test.cpp)
 target_include_directories(audio_resampler_test PUBLIC ${FFLIBS_INCLUDE_DIRS} ${cppunit_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 target_link_libraries(audio_resampler_test PUBLIC ${FFLIBS_LIBRARIES} ${cppunit_LIBRARIES} ${Boost_LIBRARIES} Threads::Threads)
 target_compile_options(audio_resampler_test PUBLIC ${FFLIBS_CFLAGS_OTHER} ${cppunit_CFLAGS_OTHER} ${Boost_CFLAGS_OTHER})
 target_compile_definitions(audio_resampler_test PRIVATE TEST_VIDEO="${TEST_DATA_DIR}/testvideo.webm")
+
+
+add_executable(static_bg_motion_detector_test ${CMAKE_SOURCE_DIR}/test/test_runner_basic.cpp ${CMAKE_SOURCE_DIR}/test/static_bg_motion_detector_test.cpp)
+target_include_directories(static_bg_motion_detector_test PUBLIC ${FFLIBS_INCLUDE_DIRS} ${cppunit_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(static_bg_motion_detector_test PUBLIC ${FFLIBS_LIBRARIES} ${cppunit_LIBRARIES} ${Boost_LIBRARIES} Threads::Threads ${OpenCV_LIBRARIES})
+target_compile_options(static_bg_motion_detector_test PUBLIC ${FFLIBS_CFLAGS_OTHER} ${cppunit_CFLAGS_OTHER} ${Boost_CFLAGS_OTHER} ${OpenCV_CFLAGS_OTHER})
+target_compile_definitions(static_bg_motion_detector_test PRIVATE TEST_VIDEO="${TEST_DATA_DIR}/motion_test.mp4")
+
+
 
 Set(OUTPUT_DIR ${CMAKE_BINARY_DIR})
 add_compile_definitions(BOOST_LOG_DYN_LINK)
@@ -88,8 +98,15 @@ endif()
 enable_testing()
 add_test(NAME decoder_test COMMAND decoder_test)
 add_test(NAME frame2cv_test COMMAND frame2cv_test)
-
 add_test(NAME audio_resampler_test COMMAND audio_resampler_test)
+add_test(NAME static_bg_motion_detector_test COMMAND static_bg_motion_detector_test)
+
+if (pocketsphinx_FOUND)
+  add_test(NAME sphinx_audio_test COMMAND sphinx_audio_test)
+  list(APPEND INSTALL_LIST ${INCLUDE_DIR}/sphinx_audio)
+endif()
+
+
 
 # Set up installer
 include(GNUInstallDirs)
@@ -104,11 +121,6 @@ set(INSTALL_LIST
   ${INCLUDE_DIR}/frame2cv
   ${INCLUDE_DIR}/video_decoder_subscriber
   )
-
-if (pocketsphinx_FOUND)
-  add_test(NAME sphinx_audio_test COMMAND sphinx_audio_test)
-  list(APPEND INSTALL_LIST ${INCLUDE_DIR}/sphinx_audio)
-endif()
 
 install(FILES
   ${INSTALL_LIST}
