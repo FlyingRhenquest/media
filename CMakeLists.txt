@@ -38,7 +38,7 @@ endif()
 set(TEST_DATA_DIR "${CMAKE_BINARY_DIR}/test_data")
 file(MAKE_DIRECTORY ${TEST_DATA_DIR})
 configure_file(${CMAKE_SOURCE_DIR}/test/data/hello_world.wav ${TEST_DATA_DIR}/hello_world.wav COPYONLY)
-configure_file(${CMAKE_SOURCE_DIR}/test/data/motion_test.mp4 ${TEST_DATA_DIR}/motion_test.mp4 COPYONLY)
+configure_file(${CMAKE_SOURCE_DIR}/test/data/motion_test.webm ${TEST_DATA_DIR}/motion_test.webm COPYONLY)
 
 if (NOT EXISTS ${TEST_DATA_DIR}/testvideo.webm)
   message("Generating test video")
@@ -82,7 +82,7 @@ add_executable(static_bg_motion_detector_test ${CMAKE_SOURCE_DIR}/test/test_runn
 target_include_directories(static_bg_motion_detector_test PUBLIC ${FFLIBS_INCLUDE_DIRS} ${cppunit_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(static_bg_motion_detector_test PUBLIC ${FFLIBS_LIBRARIES} ${cppunit_LIBRARIES} ${Boost_LIBRARIES} Threads::Threads ${OpenCV_LIBRARIES})
 target_compile_options(static_bg_motion_detector_test PUBLIC ${FFLIBS_CFLAGS_OTHER} ${cppunit_CFLAGS_OTHER} ${Boost_CFLAGS_OTHER} ${OpenCV_CFLAGS_OTHER})
-target_compile_definitions(static_bg_motion_detector_test PRIVATE TEST_VIDEO="${TEST_DATA_DIR}/motion_test.mp4")
+target_compile_definitions(static_bg_motion_detector_test PRIVATE TEST_VIDEO="${TEST_DATA_DIR}/motion_test.webm")
 
 
 
