@@ -28,6 +28,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 }
 
+#include <atomic>
 #include <boost/log/trivial.hpp>
 #include <boost/signals2.hpp>
 #include <fr/media/decoder_interface>
@@ -35,7 +36,6 @@ extern "C" {
 #include <functional>
 #include <memory>
 #include <thread>
-#include <mutex>
 #include <vector>
 
 namespace fr {
@@ -69,11 +69,11 @@ namespace fr {
       std::vector<AVCodecContext *> codec_contexts;
 
       // Some state flags
-      bool opened;
-      bool done;
-      bool processing;
+      std::atomic<bool> opened;
+      std::atomic<bool> done;
+      std::atomic<bool> processing;
       // Toggle to true to make process_privately exit early.
-      bool shutdown_flag; 
+      std::atomic<bool> shutdown_flag; 
       
       std::thread processing_thread;
 
@@ -186,8 +186,7 @@ namespace fr {
       bool shutting_down()
       {
 	bool retval = false;
-	std::lock_guard<std::mutex> lock(signaling_mutex);
-	return shutdown_flag || done;				   
+	return shutdown_flag.load() || done;				   
       }
 
       // This method runs in a separate thread and just reads and
@@ -204,7 +203,6 @@ namespace fr {
 	while(!shutting_down()) {
 	  if (av_read_frame(format_context, &compressed_packet) < 0) {
 	    BOOST_LOG_TRIVIAL(info) << "Hit EOF or something, all done.";
-	    std::lock_guard<std::mutex> lock(signaling_mutex);
 	    done = true;
 	  } else {
 	    // Use the correct codec context to decode the stream
@@ -214,7 +212,6 @@ namespace fr {
 	      if (avret < 0) {
 		// You can look these errors up and log them with av_err2str if you want
 		BOOST_LOG_TRIVIAL(info) << "avcodec_send_packet returned " << avret << "; shutting down.";
-		std::lock_guard<std::mutex> lock(signaling_mutex);
 		done = true;
 	      } else {
 		while(avret >= 0) {
@@ -223,7 +220,6 @@ namespace fr {
 		    break;
 		  } else if (avret < 0) {
 		    BOOST_LOG_TRIVIAL(debug) << "Error reading frame: " << avret;
-		    std::lock_guard<std::mutex> lock(signaling_mutex);
 		    done = true;
 		    break;
 		  }
@@ -246,11 +242,6 @@ namespace fr {
       
     public:
 
-
-      // If you don't like shared pointers, don't use them. I like
-      // them, and it makes these things a lot easier to pass around.
-      // You can totally allocate this on the stack if that's what
-      // you want to do.
       typedef std::shared_ptr<decoder> pointer;
 
       static pointer create(std::string filename, AVInputFormat *inpf = nullptr)
@@ -258,12 +249,14 @@ namespace fr {
 	return std::make_shared<decoder>(filename, inpf); 
       }
       
-
-      // Mutex for tweaking signal flags.
-      std::mutex signaling_mutex;
-
       decoder(std::string filename, AVInputFormat *inpf = nullptr) : filename(filename), inpf(inpf), format_context(nullptr), opened(false), done(false), processing(false), shutdown_flag(false)
       {	
+      }
+
+      // Open with an input format name (like video4linux or alsa)
+      decoder(std::string filename, std::string format_name) : filename(filename), inpf(nullptr), format_context(nullptr), opened(false), done(false), processing(false), shutdown_flag(false)
+      {
+	inpf = av_find_input_format(format_name.c_str());
       }
 
       // NO COPIES FOR YOU!
@@ -271,15 +264,10 @@ namespace fr {
 
       virtual ~decoder()
       {
-	{ // Make a new scope so I don't have to keep the signalling mutex open for long
-	  std::lock_guard<std::mutex> lock(signaling_mutex);
-	  if (opened && !done) {
-
+	if (opened.load() && !done.load()) {
 	    // Will instruct processing thread to stop
-	    done = true;
-	  }
+	    done = true;	  
 	}
-
 	this->join();
       }
 
@@ -300,7 +288,7 @@ namespace fr {
 
       void process()
       {
-	if (opened || processing) {
+	if (opened.load() || processing.load()) {
 	  BOOST_LOG_TRIVIAL(error) << "Already processing.";
 	} else {
 	  open_all_the_things();
@@ -312,8 +300,7 @@ namespace fr {
 
       void shutdown()
       {
-	std::lock_guard<std::mutex> lock(signaling_mutex);
-	if (!opened && !processing) {
+	if (!opened.load() && !processing.load()) {
 	  BOOST_LOG_TRIVIAL(error) << "Shutdown called but I'm not processing right now.";
 	  return;
 	}

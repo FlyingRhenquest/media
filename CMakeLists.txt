@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD 14)
 include_directories(BEFORE ${CMAKE_SOURCE_DIR}/include)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
+find_package(pybind11 CONFIG)
 
 # ffmpeg generates pkg-config files, so we'll use those
 find_package(PkgConfig REQUIRED)
@@ -25,6 +26,7 @@ set(Boost_USE_STATIC_LIBS OFF)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost COMPONENTS log program_options REQUIRED)
+add_definitions( -DBOOST_ALL_DYN_LINK )
 
 # Set up unit tests
 
@@ -87,7 +89,6 @@ target_compile_definitions(static_bg_motion_detector_test PRIVATE TEST_VIDEO="${
 
 
 Set(OUTPUT_DIR ${CMAKE_BINARY_DIR})
-add_compile_definitions(BOOST_LOG_DYN_LINK)
 
 add_compile_definitions(OUTPUT_DIR="${OUTPUT_DIR}")
   
@@ -106,7 +107,12 @@ if (pocketsphinx_FOUND)
   list(APPEND INSTALL_LIST ${INCLUDE_DIR}/sphinx_audio)
 endif()
 
-
+if (pybind11_FOUND)
+   pybind11_add_module(fr_media MODULE "${CMAKE_SOURCE_DIR}/python3/frmedia.cpp")
+   target_include_directories(fr_media PRIVATE ${FFLIBS_INCLUDE_DIRS} ${cppunit_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
+   target_link_libraries(fr_media PRIVATE ${FFLIBS_LIBRARIES} ${cppunit_LIBRARIES} ${Boost_LIBRARIES} Threads::Threads)
+   target_compile_options(fr_media PRIVATE ${FFLIBS_CFLAGS_OTHER} ${Boost_CFLAGS_OTHER})
+   endif()
 
 # Set up installer
 include(GNUInstallDirs)
